@@ -185,10 +185,20 @@ class EEGWaveNeuron:
     def activate(self, input_signal, eeg_signal, t):
         eeg_influence = self.amplitude * np.sin(2 * np.pi * self.frequency * t + self.phase) * eeg_signal
         past_resonance = np.mean(self.memory) * self.resonance_weight
-        self.output = eeg_influence + input_signal + past_resonance
+        total_input = eeg_influence + input_signal + past_resonance
+
+        # Apply tanh activation function
+        self.output = np.tanh(total_input)
+
+        # Check for NaN or Inf
+        if not np.isfinite(self.output):
+            self.output = 0.0
+
+        # Update memory
         self.memory[self.memory_pointer] = self.output
         self.memory_pointer = (self.memory_pointer + 1) % len(self.memory)
         return self.output
+
 
 class ResonantBrain:
     def __init__(self, num_neurons=16, memory_size=100):
