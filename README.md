@@ -1,5 +1,8 @@
 ## EEG TiniOne Simulator and EEG AI Model Maker
 
+![Description of tiniones](./tiniones.png)
+
+
 # Overview
 
 This repository contains two interconnected projects:
