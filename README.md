@@ -117,8 +117,6 @@ Upload your EDF file containing EEG data.
 
 Configure parameters such as epoch length, batch size, number of epochs, learning rate, and latent dimension.
 
-Perhaps best not to change the settings. Might work. Might not. Works for me with EDF file I found. 
-
 Click the "Process EEG Data" button.
 
 Once processing is complete, download the trained model and hidden vectors.
