@@ -129,20 +129,17 @@ class SmallBrain(nn.Module):
         self.coupling = nn.Parameter(torch.randn(num_neurons, num_neurons) * coupling_strength)
         
         # Neural projections
-        self.input_proj = nn.Linear(latent_dim + 1, num_neurons)  # +1 for hearing neuron
+        self.input_proj = nn.Linear(latent_dim, num_neurons)
         self.output_proj = nn.Linear(num_neurons, latent_dim)
         
         # Register state as a buffer to exclude it from gradient computations
         self.register_buffer('state', torch.zeros(num_neurons))
         self.memory = []
         
-    def forward(self, x, t, hearing_input):
+    def forward(self, x, t):
         # Handle device consistency
         if self.state.device != x.device:
             self.state = self.state.to(x.device)
-        
-        # Concatenate hearing input
-        x = torch.cat([x, hearing_input.unsqueeze(0)], dim=1)
         
         # Project input to neuron space
         neuron_input = self.input_proj(x)
@@ -185,20 +182,10 @@ class EEGWaveNeuron:
     def activate(self, input_signal, eeg_signal, t):
         eeg_influence = self.amplitude * np.sin(2 * np.pi * self.frequency * t + self.phase) * eeg_signal
         past_resonance = np.mean(self.memory) * self.resonance_weight
-        total_input = eeg_influence + input_signal + past_resonance
-
-        # Apply tanh activation function
-        self.output = np.tanh(total_input)
-
-        # Check for NaN or Inf
-        if not np.isfinite(self.output):
-            self.output = 0.0
-
-        # Update memory
+        self.output = eeg_influence + input_signal + past_resonance
         self.memory[self.memory_pointer] = self.output
         self.memory_pointer = (self.memory_pointer + 1) % len(self.memory)
         return self.output
-
 
 class ResonantBrain:
     def __init__(self, num_neurons=16, memory_size=100):
@@ -294,8 +281,6 @@ class TiniOne:
         self.sound_memory = []  # For longer sound sequences
         self.heard_sounds = []  # For processing heard sounds
         self.communication_length = 0.8  # Default communication length
-        self.canvas_width = canvas_width
-        self.canvas_height = canvas_height
 
     def initialize_genetic_traits(self) -> dict:
         return {
@@ -305,35 +290,37 @@ class TiniOne:
             'draw_activation_threshold': random.uniform(0.6, 0.9)
         }
 
-    def can_move_to(self, new_position, other_tiniones):
+    def move(self):
+        dx = cos(radians(self.direction)) * self.speed
+        dy = sin(radians(self.direction)) * self.speed
+        new_x = max(self.bug_radius, min(800 - self.bug_radius, self.position[0] + dx))
+        new_y = max(self.bug_radius, min(600 - self.bug_radius, self.position[1] + dy))
+        self.position = [new_x, new_y]
+        self.trail.append(tuple(self.position))
+        if len(self.trail) > 50:
+            self.trail.pop(0)
+
+    def avoid_others(self, other_tiniones: List['TiniOne']):
+        collision = False
         for other in other_tiniones:
             if other == self:
                 continue
-            dist = sqrt((new_position[0] - other.position[0]) ** 2 +
-                        (new_position[1] - other.position[1]) ** 2)
+            dist = sqrt((self.position[0] - other.position[0]) ** 2 +
+                       (self.position[1] - other.position[1]) ** 2)
             if dist < self.bug_radius * 2:
-                return False
-        # Check boundaries
-        if not (self.bug_radius <= new_position[0] <= self.canvas_width - self.bug_radius and
-                self.bug_radius <= new_position[1] <= self.canvas_height - self.bug_radius):
-            return False
-        return True
-
-    def move(self, other_tiniones):
-        dx = cos(radians(self.direction)) * self.speed
-        dy = sin(radians(self.direction)) * self.speed
-        new_x = self.position[0] + dx
-        new_y = self.position[1] + dy
-        new_position = [new_x, new_y]
-        if self.can_move_to(new_position, other_tiniones):
-            self.position = new_position
-            self.trail.append(tuple(self.position))
-            if len(self.trail) > 50:
-                self.trail.pop(0)
+                angle_to_other = degrees(atan2(
+                    other.position[1] - self.position[1],
+                    other.position[0] - self.position[0]
+                ))
+                self.direction += 180 + random.uniform(-30, 30)
+                collision = True
+                # Generate particle effect
+                self.create_particles()
+        if collision:
+            self.state = "avoiding"
+            self.can_talk = True
         else:
-            # Randomly adjust direction to find a valid movement
-            self.direction += random.uniform(-45, 45)
-            self.direction %= 360
+            self.state = "exploring"
 
     def detect_in_vision(self, other_tiniones: List['TiniOne'], webcam_input: np.ndarray) -> np.ndarray:
         vision_data = []
@@ -389,15 +376,14 @@ class TiniOne:
             if particle['life'] <= 0:
                 self.particles.remove(particle)
 
-    def is_near(self, other_tinion, threshold=200):
+    def is_near(self, other_tinion, threshold=50):
         dx = self.position[0] - other_tinion.position[0]
         dy = self.position[1] - other_tinion.position[1]
         distance = sqrt(dx**2 + dy**2)
         return distance < threshold
 
-    def hear_sound(self, frequency, volume):
-        # Volume is adjusted based on distance
-        self.heard_sounds.append((frequency, volume))
+    def hear_sound(self, frequency):
+        self.heard_sounds.append(frequency)
 
     def think_and_act(self, environment_input: np.ndarray, other_tiniones: List['TiniOne'], 
                      webcam_input: np.ndarray, neuron_boosts: List['NeuronBoost'], is_paused: bool,
@@ -405,9 +391,9 @@ class TiniOne:
         if is_paused:
             return None, "", self.echo_trails
 
+        self.avoid_others(other_tiniones)
         vision_signal = self.detect_in_vision(other_tiniones, webcam_input)
         combined_input = environment_input + vision_signal
-        hearing_input = torch.tensor([np.mean([v for f, v in self.heard_sounds])] if self.heard_sounds else [0.0], dtype=torch.float32)
         latent_vector = self.processor.process_and_update(combined_input)
         oscillatory_energy = np.mean([abs(neuron.output) for neuron in self.processor.brain.neurons])
 
@@ -427,7 +413,7 @@ class TiniOne:
 
         self.direction %= 360
         self.vision_direction %= 360
-        self.move(other_tiniones)
+        self.move()
         self.update_particles()
 
         # Check for neuron boosts
@@ -455,12 +441,10 @@ class TiniOne:
 
         # Process heard sounds
         if self.heard_sounds:
+            average_heard_frequency = np.mean(self.heard_sounds)
             # Adjust speed based on heard sounds
-            total_volume = sum([v for f, v in self.heard_sounds])
-            if total_volume > 0:
-                weighted_frequency = sum([f * v for f, v in self.heard_sounds]) / total_volume
-                self.speed += (weighted_frequency - 1250) / 500  # Adjust speed slightly
-                self.speed = max(2.0, min(7.0, self.speed))
+            self.speed += (average_heard_frequency - 1250) / 500  # Adjust speed slightly
+            self.speed = max(2.0, min(7.0, self.speed))
             # Clear heard_sounds
             self.heard_sounds = []
 
@@ -515,8 +499,8 @@ class TiniOne:
         # Play the sound
         self.sound_channel.play(sound)
 
-        # TiniOne hears its own sound slightly
-        self.hear_sound(np.mean(frequencies), volume * 0.5)  # They hear themselves at half volume
+        # TiniOne hears its own sound
+        self.hear_sound(np.mean(frequencies))
 
     def draw(self, canvas):
         x, y = self.position
@@ -620,9 +604,9 @@ class EnhancedTiniOne(TiniOne):
         if is_paused:
             return None, "", self.echo_trails
 
+        self.avoid_others(other_tiniones)
         vision_signal = self.detect_in_vision(other_tiniones, webcam_input)
         combined_input = environment_input + vision_signal
-        hearing_input = torch.tensor([np.mean([v for f, v in self.heard_sounds])] if self.heard_sounds else [0.0], dtype=torch.float32)
         latent_vector = self.processor.process_and_update(combined_input)
         oscillatory_energy = np.mean([abs(neuron.output) for neuron in self.processor.brain.neurons])
 
@@ -642,7 +626,7 @@ class EnhancedTiniOne(TiniOne):
 
         self.direction %= 360
         self.vision_direction %= 360
-        self.move(other_tiniones)
+        self.move()
         self.update_particles()
 
         t = time.time()
@@ -653,8 +637,7 @@ class EnhancedTiniOne(TiniOne):
 
         brain_output = self.small_brain(
             torch.FloatTensor(latent_vector),
-            t,
-            hearing_input  # Pass hearing input
+            t
         )
 
         combined_output = (
@@ -686,12 +669,10 @@ class EnhancedTiniOne(TiniOne):
 
         # Process heard sounds
         if self.heard_sounds:
+            average_heard_frequency = np.mean(self.heard_sounds)
             # Adjust speed based on heard sounds
-            total_volume = sum([v for f, v in self.heard_sounds])
-            if total_volume > 0:
-                weighted_frequency = sum([f * v for f, v in self.heard_sounds]) / total_volume
-                self.speed += (weighted_frequency - 1250) / 500  # Adjust speed slightly
-                self.speed = max(2.0, min(7.0, self.speed))
+            self.speed += (average_heard_frequency - 1250) / 500  # Adjust speed slightly
+            self.speed = max(2.0, min(7.0, self.speed))
             # Clear heard_sounds
             self.heard_sounds = []
 
@@ -1045,15 +1026,9 @@ class EEGBugSimulatorApp:
         # Simulate hearing sounds from nearby TiniOnes
         for tinione in self.tiniones:
             for other_tinione in self.tiniones:
-                if tinione != other_tinione:
+                if tinione != other_tinione and tinione.is_near(other_tinione):
                     if other_tinione.sound_frequency is not None:
-                        dx = tinione.position[0] - other_tinione.position[0]
-                        dy = tinione.position[1] - other_tinione.position[1]
-                        distance = sqrt(dx**2 + dy**2)
-                        max_hearing_distance = 200
-                        if distance < max_hearing_distance:
-                            volume = max(0.1, 1 - (distance / max_hearing_distance))
-                            tinione.hear_sound(other_tinione.sound_frequency, volume)
+                        tinione.hear_sound(other_tinione.sound_frequency)
 
         self.update_bug_heatmaps()
 
@@ -1092,14 +1067,7 @@ class EEGBugSimulatorApp:
         Key Features:
         - EEG Model Integration: Processes brain activity patterns.
         - SmallBrain System: Mini neural networks that learn from EEG patterns.
-        - **Distance-Based Hearing**:
-          - TiniOnes hear each other's sounds louder the closer they are to each other.
-          - They have a neuron dedicated to processing heard sounds.
-          - TiniOnes also hear themselves slightly.
-        - **No Repulsion Behavior**:
-          - TiniOnes do not change direction when they get close to each other.
-          - Instead, they cannot overlap and adjust their movement to prevent overlapping.
-        - **Adjustable Vision Cone**:
+        - Adjustable Vision Cone:
           - TiniOnes can adjust their vision range and angle.
           - When they look further, their vision cone becomes narrower.
           - They can adjust the direction of their vision independently of their movement.
@@ -1118,7 +1086,7 @@ class EEGBugSimulatorApp:
         - Audio Feedback:
           - TiniOnes produce longer sound sequences based on their memory.
           - Sounds are played less frequently but have longer duration.
-          - TiniOnes hear their own sounds slightly, influencing their behavior.
+          - TiniOnes hear their own sounds, which influences their behavior.
           - **Audio Zoom**: TiniOnes near the mouse cursor are louder.
         - Control Panel:
           - Adjust simulation parameters in real-time.
@@ -1135,7 +1103,6 @@ class EEGBugSimulatorApp:
         - **Memory**: TiniOnes have a memory of past neural states, influencing their current behavior and sounds.
         - **Sound Generation**: Sounds are generated based on their neural activity and memory, leading to unique audio patterns.
         - **Adjustable Vision**: TiniOnes can focus on distant objects with a narrower vision cone or nearby objects with a wider vision cone.
-        - **Distance-Based Hearing**: TiniOnes hear sounds from others based on proximity, with closer sounds being louder.
 
         Usage:
         1. Select trained EEG model (.pth file).
@@ -1148,10 +1115,11 @@ class EEGBugSimulatorApp:
         8. Adjust the **Volume Level** slider to control the sound volume.
         9. Adjust the **Communication Length** slider to set the length of TiniOnes' sounds.
 
-        Behavior:
-        - TiniOnes do not repel each other but cannot overlap. They adjust their movement to avoid occupying the same space.
-        - They hear each other's sounds louder when closer, influencing their neural activity and behavior.
-        - TiniOnes also hear themselves slightly, adding to their sensory input.
+        Brain States:
+        - Heatmaps display neural activity.
+        - Trails show movement history.
+        - Particle effects when TiniOnes interact.
+        - Sounds reflect TiniOnes' memory and influence their behavior.
 
         Enjoy exploring the emergent behaviors of TiniOnes!
         """
