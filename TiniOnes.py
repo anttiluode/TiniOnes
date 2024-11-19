@@ -180,41 +180,68 @@ class EEGWaveNeuron:
         self.resonance_weight = 0.9
 
     def activate(self, input_signal, eeg_signal, t):
-        eeg_influence = self.amplitude * np.sin(2 * np.pi * self.frequency * t + self.phase) * eeg_signal
-        past_resonance = np.mean(self.memory) * self.resonance_weight
-        self.output = eeg_influence + input_signal + past_resonance
+        # Clip inputs to prevent overflow
+        input_signal = np.clip(input_signal, -10, 10)
+        eeg_signal = np.clip(eeg_signal, -10, 10)
+        
+        # Calculate wave influence with bounded oscillation
+        wave = self.amplitude * np.sin(2 * np.pi * self.frequency * t + self.phase)
+        eeg_influence = wave * eeg_signal * 0.5  # Reduced influence
+        
+        # Calculate past resonance with normalization
+        if len(self.memory) > 0:
+            past_resonance = np.mean(self.memory) * self.resonance_weight * 0.5
+        else:
+            past_resonance = 0
+        
+        # Combine signals with tanh activation to bound output
+        combined = eeg_influence + input_signal + past_resonance
+        self.output = np.tanh(combined)  # Ensures output is between -1 and 1
+        
+        # Update memory with bounded value
         self.memory[self.memory_pointer] = self.output
         self.memory_pointer = (self.memory_pointer + 1) % len(self.memory)
+        
         return self.output
 
 class ResonantBrain:
     def __init__(self, num_neurons=16, memory_size=100):
         self.neurons = [EEGWaveNeuron(memory_size=memory_size) for _ in range(num_neurons)]
         self.connections = self._initialize_connections()
-
+        
     def _initialize_connections(self):
         connections = {}
         for n1 in self.neurons:
             for n2 in self.neurons:
                 if n1 != n2:
-                    connections[(n1, n2)] = np.random.uniform(0.1, 0.5)
+                    connections[(n1, n2)] = np.random.uniform(0.1, 0.3)  # Reduced connection strength
         return connections
 
     def update(self, eeg_latent: np.ndarray, dt=0.1):
-        # Update neurons
+        # Update neurons with bounds checking
         for neuron, latent_value in zip(self.neurons, eeg_latent):
-            input_signal = np.mean([
-                self.connections.get((neuron, other), 0) * other.output
-                for other in self.neurons if other != neuron
-            ])
-            neuron.activate(input_signal, latent_value, dt)
+            input_signal = 0.0
+            for other in self.neurons:
+                if other != neuron:
+                    weight = self.connections.get((neuron, other), 0)
+                    # Clip other.output to prevent overflow
+                    clipped_output = np.clip(other.output, -10, 10)
+                    input_signal += weight * clipped_output
+            
+            # Normalize input signal
+            if len(self.neurons) > 1:
+                input_signal /= (len(self.neurons) - 1)
+            
+            # Clip latent value
+            clipped_latent = np.clip(latent_value, -10, 10)
+            neuron.activate(input_signal, clipped_latent, dt)
 
-        # Hebbian Learning
+        # Modified Hebbian Learning with bounds
         for (pre, post), weight in self.connections.items():
             if pre.output > 0.5 and post.output > 0.5:
-                self.connections[(pre, post)] = min(weight + 0.01, 1.0)
+                self.connections[(pre, post)] = min(weight + 0.001, 0.5)  # Slower learning, upper bound
             else:
-                self.connections[(pre, post)] = max(weight - 0.01, 0.0)
+                self.connections[(pre, post)] = max(weight - 0.0005, 0.1)  # Slower decay, lower bound
 
 class DynamicWaveEEGProcessor:
     def __init__(self, eeg_model_path: str, latent_dim=64, num_neurons=16):
@@ -291,11 +318,34 @@ class TiniOne:
         }
 
     def move(self):
+        # Add random movement to prevent clustering
+        if random.random() < 0.05:  # 5% chance to change direction randomly
+            self.direction += random.uniform(-45, 45)
+            
+        # Add repulsion from edges
+        edge_buffer = 50
+        if self.position[0] < edge_buffer:
+            self.direction = random.uniform(-45, 45)
+        elif self.position[0] > 800 - edge_buffer:
+            self.direction = random.uniform(135, 225)
+        if self.position[1] < edge_buffer:
+            self.direction = random.uniform(45, 135)
+        elif self.position[1] > 600 - edge_buffer:
+            self.direction = random.uniform(225, 315)
+            
+        # Update position with bounded speed
+        self.speed = np.clip(self.speed, 2.0, 7.0)
         dx = cos(radians(self.direction)) * self.speed
         dy = sin(radians(self.direction)) * self.speed
+        
+        # Add small random jitter to prevent exact overlap
+        dx += random.uniform(-0.5, 0.5)
+        dy += random.uniform(-0.5, 0.5)
+        
         new_x = max(self.bug_radius, min(800 - self.bug_radius, self.position[0] + dx))
         new_y = max(self.bug_radius, min(600 - self.bug_radius, self.position[1] + dy))
         self.position = [new_x, new_y]
+        
         self.trail.append(tuple(self.position))
         if len(self.trail) > 50:
             self.trail.pop(0)
